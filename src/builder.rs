@@ -31,6 +31,8 @@ pub struct MountBuilder<'a> {
     #[cfg(feature = "loop")]
     loopback_offset: u64,
     data: Option<&'a str>,
+    #[cfg(feature = "loop")]
+    create_loop: bool,
 }
 
 impl<'a> MountBuilder<'a> {
@@ -60,6 +62,14 @@ impl<'a> MountBuilder<'a> {
     #[must_use]
     pub fn loopback_offset(mut self, offset: u64) -> Self {
         self.loopback_offset = offset;
+        self
+    }
+
+    /// Whether to create loopback device
+    #[cfg(feature = "loop")]
+    #[must_use]
+    pub fn create_loop(mut self, create_loop: bool) -> Self {
+        self.create_loop = create_loop;
         self
     }
 
@@ -112,6 +122,8 @@ impl<'a> MountBuilder<'a> {
             flags,
             #[cfg(feature = "loop")]
             loopback_offset,
+            #[cfg(feature = "loop")]
+            create_loop
         } = self;
 
         let supported;
@@ -132,29 +144,31 @@ impl<'a> MountBuilder<'a> {
         if !source.as_os_str().is_empty() {
             // Create a loopback device if an iso or squashfs is being mounted.
             #[cfg(feature = "loop")]
-            if let Some(ext) = source.extension() {
-                let extf = i32::from(ext == "iso") | if ext == "squashfs" { 2 } else { 0 };
+            if create_loop {
+                if let Some(ext) = source.extension() {
+                    let extf = i32::from(ext == "iso") | if ext == "squashfs" { 2 } else { 0 };
 
-                if extf != 0 {
-                    fstype = if extf == 1 {
-                        flags |= MountFlags::RDONLY;
-                        FilesystemType::Manual("iso9660")
-                    } else {
-                        flags |= MountFlags::RDONLY;
-                        FilesystemType::Manual("squashfs")
-                    };
+                    if extf != 0 {
+                        fstype = if extf == 1 {
+                            flags |= MountFlags::RDONLY;
+                            FilesystemType::Manual("iso9660")
+                        } else {
+                            flags |= MountFlags::RDONLY;
+                            FilesystemType::Manual("squashfs")
+                        };
+                    }
+
+                    let new_loopback = loopdev::LoopControl::open()?.next_free()?;
+                    new_loopback
+                        .with()
+                        .read_only(flags.contains(MountFlags::RDONLY))
+                        .offset(loopback_offset)
+                        .attach(source)?;
+                    let path = new_loopback.path().expect("loopback does not have path");
+                    c_source = Some(to_cstring(path.as_os_str().as_bytes())?);
+                    loop_path = Some(path);
+                    loopback = Some(new_loopback);
                 }
-
-                let new_loopback = loopdev::LoopControl::open()?.next_free()?;
-                new_loopback
-                    .with()
-                    .read_only(flags.contains(MountFlags::RDONLY))
-                    .offset(loopback_offset)
-                    .attach(source)?;
-                let path = new_loopback.path().expect("loopback does not have path");
-                c_source = Some(to_cstring(path.as_os_str().as_bytes())?);
-                loop_path = Some(path);
-                loopback = Some(new_loopback);
             }
 
             if c_source.is_none() {
